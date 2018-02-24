@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Juniper/go-netconf/netconf"
+	"golang.org/x/crypto/ssh"
 )
 
 // All of our RPC calls we use.
@@ -157,22 +158,15 @@ type versionPackageInfo struct {
 // to run our commands against. NewSession also gathers software information
 // about the device. Logger is optional for additonal NETCONF logging
 // logger is any logger that implements the netconf.Logger interface (ex: logrus)
-func NewSession(host, user, password string, logger ...interface{}) (*Junos, error) {
+func NewSession(host string, config *ssh.ClientConfig) (*Junos, error) {
 	rex := regexp.MustCompile(`^.*\[(.*)\]`)
 
-	if logger != nil {
-		l, ok := logger[0].(netconf.Logger)
-		if ok {
-			netconf.SetLog(l)
-		}
-	}
-
-	s, err := netconf.DialSSH(host, netconf.SSHConfigPassword(user, password))
+	session, err := netconf.DialSSH(host, config)
 	if err != nil {
 		panic(fmt.Errorf("error connecting to %s - %s", host, err))
 	}
 
-	reply, err := s.Exec(netconf.RawMethod(rpcVersion))
+	reply, err := session.Exec(netconf.RawMethod(rpcVersion))
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +197,7 @@ func NewSession(host, user, password string, logger ...interface{}) (*Junos, err
 		}
 
 		return &Junos{
-			Session:        s,
+			Session:        session,
 			Hostname:       hostname,
 			RoutingEngines: numRE,
 			Platform:       res,
@@ -225,7 +219,7 @@ func NewSession(host, user, password string, logger ...interface{}) (*Junos, err
 	res = append(res, RoutingEngine{Model: model, Version: version[1]})
 
 	return &Junos{
-		Session:        s,
+		Session:        session,
 		Hostname:       hostname,
 		RoutingEngines: 1,
 		Platform:       res,
