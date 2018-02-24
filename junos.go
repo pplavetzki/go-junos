@@ -3,6 +3,8 @@
 package junos
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -152,6 +154,45 @@ type versionPackageInfo struct {
 	XMLName         xml.Name `xml:"package-information"`
 	PackageName     []string `xml:"name"`
 	SoftwareVersion []string `xml:"comment"`
+}
+
+// SSHConfigPassword is a convenience function that takes a username and password
+// and returns a new ssh.ClientConfig setup to pass that username and password.
+// Convenience means that HostKey checks are disabled so it's probably less secure
+func SSHConfigPubKeyFile(user string, file string, passphrase string) (*ssh.ClientConfig, error) {
+	buf, err := ioutil.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+	block, rest := pem.Decode(buf)
+	if len(rest) > 0 {
+		return nil, fmt.Errorf("pem: unable to decode file %s", file)
+	}
+
+	if x509.IsEncryptedPEMBlock(block) {
+		b := block.Bytes
+		b, err = x509.DecryptPEMBlock(block, []byte(passphrase))
+		if err != nil {
+			return nil, err
+		}
+		buf = pem.EncodeToMemory(&pem.Block{
+			Type:  block.Type,
+			Bytes: b,
+		})
+	}
+
+	key, err := ssh.ParsePrivateKey(buf)
+	if err != nil {
+		return nil, err
+	}
+	return &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.PublicKeys(key),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}, nil
+
 }
 
 // NewSession establishes a new connection to a Junos device that we will use
