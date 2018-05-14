@@ -55,6 +55,7 @@ var (
 	rpcCommitHistory       = "<get-commit-information/>"
 	rpcFileList            = "<file-list><detail/><path>%s</path></file-list>"
 	rpcInterfaces          = "<get-interface-information/>"
+	rpcSystemInformation   = "<get-system-information/>"
 )
 
 // Junos contains our session state.
@@ -334,6 +335,22 @@ func (j *Junos) CommitHistory() (*CommitHistory, error) {
 	}
 
 	return &history, nil
+}
+
+// GetFacts returns device information
+func (j *Junos) GetFacts() error {
+	reply, err := j.Session.Exec(netconf.RawMethod(rpcSystemInformation))
+	if err != nil {
+		return err
+	}
+
+	if reply.Errors != nil {
+		for _, m := range reply.Errors {
+			return errors.New(m.Message)
+		}
+	}
+
+	return nil
 }
 
 // Commit commits the configuration.
