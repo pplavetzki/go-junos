@@ -3,8 +3,6 @@
 package junos
 
 import (
-	"crypto/x509"
-	"encoding/pem"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -13,8 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Juniper/go-netconf/netconf"
 	"golang.org/x/crypto/ssh"
+
+	"github.com/Juniper/go-netconf/netconf"
 )
 
 // All of our RPC calls we use.
@@ -68,15 +67,23 @@ type Junos struct {
 }
 
 // AuthMethod defines how we want to authenticate to the device. If using a
-// username and password to authenticate, the Credentials field must contain the username and password
-//, respectively (i.e. []string{"admin", "password"}). If you are using an SSH key file for
-// authentication, provide SSH username, passphrase and the path to the file for their respective fields.
-// type AuthMethod struct {
-// 	Credentials   []string
-// 	SSHUsername   string
-// 	SSHPassphrase string
-// 	SSHKeyFile    string
-// }
+// username and password to authenticate, the Credentials field must be populated like so:
+//
+// []string{"user", "password"}
+//
+// If you are using an SSH prviate key for authentication, you must provide the username,
+// path to the private key, and passphrase. On most systems, the private key is found in
+// the following location:
+//
+// ~/.ssh/id_rsa
+//
+// If you do not have a passphrase tied to your private key, then you can omit this field.
+type AuthMethod struct {
+	Credentials []string
+	Username    string
+	PrivateKey  string
+	Passphrase  string
+}
 
 // CommitHistory holds all of the commit entries.
 type CommitHistory struct {
@@ -156,58 +163,49 @@ type versionPackageInfo struct {
 	SoftwareVersion []string `xml:"comment"`
 }
 
-// SSHConfigPassword is a convenience function that takes a username and password
-// and returns a new ssh.ClientConfig setup to pass that username and password.
-// Convenience means that HostKey checks are disabled so it's probably less secure
-func SSHConfigPubKeyFile(user string, file string, passphrase string) (*ssh.ClientConfig, error) {
-	buf, err := ioutil.ReadFile(file)
-	if err != nil {
-		return nil, err
-	}
-	block, rest := pem.Decode(buf)
-	if len(rest) > 0 {
-		return nil, fmt.Errorf("pem: unable to decode file %s", file)
+// genSSHClientConfig is a wrapper function based around the auth method defined
+// (user/password or private key) which returns the SSH client configuration used to
+// connect.
+func genSSHClientConfig(auth *AuthMethod) *ssh.ClientConfig {
+	var config *ssh.ClientConfig
+
+	if len(auth.Credentials) > 0 {
+		config = netconf.SSHConfigPassword(auth.Credentials[0], auth.Credentials[1])
+
+		return config
 	}
 
-	if x509.IsEncryptedPEMBlock(block) {
-		b := block.Bytes
-		b, err = x509.DecryptPEMBlock(block, []byte(passphrase))
+	if len(auth.PrivateKey) > 0 {
+		config, err := netconf.SSHConfigPubKeyFile(auth.Username, auth.PrivateKey, auth.Passphrase)
 		if err != nil {
-			return nil, err
+			panic(err)
 		}
-		buf = pem.EncodeToMemory(&pem.Block{
-			Type:  block.Type,
-			Bytes: b,
-		})
+
+		config.HostKeyCallback = ssh.InsecureIgnoreHostKey()
+
+		return config
 	}
 
-	key, err := ssh.ParsePrivateKey(buf)
-	if err != nil {
-		return nil, err
-	}
-	return &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
-			ssh.PublicKeys(key),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}, nil
-
+	return config
 }
 
 // NewSession establishes a new connection to a Junos device that we will use
-// to run our commands against. NewSession also gathers software information
-// about the device. Logger is optional for additonal NETCONF logging
-// logger is any logger that implements the netconf.Logger interface (ex: logrus)
-func NewSession(host string, config *ssh.ClientConfig) (*Junos, error) {
+// to run our commands against, as well as gathers basic information about the device.
+// Authentication methods are defined using the AuthMethod struct, and are as follows:
+//
+// username and password, SSH private key (with or without passphrase)
+//
+// Please view the package documentation for AuthMethod on how to use these methods.
+func NewSession(host string, auth *AuthMethod) (*Junos, error) {
 	rex := regexp.MustCompile(`^.*\[(.*)\]`)
+	clientConfig := genSSHClientConfig(auth)
 
-	session, err := netconf.DialSSH(host, config)
+	s, err := netconf.DialSSH(host, clientConfig)
 	if err != nil {
 		panic(fmt.Errorf("error connecting to %s - %s", host, err))
 	}
 
-	reply, err := session.Exec(netconf.RawMethod(rpcVersion))
+	reply, err := s.Exec(netconf.RawMethod(rpcVersion))
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +236,7 @@ func NewSession(host string, config *ssh.ClientConfig) (*Junos, error) {
 		}
 
 		return &Junos{
-			Session:        session,
+			Session:        s,
 			Hostname:       hostname,
 			RoutingEngines: numRE,
 			Platform:       res,
@@ -260,7 +258,7 @@ func NewSession(host string, config *ssh.ClientConfig) (*Junos, error) {
 	res = append(res, RoutingEngine{Model: model, Version: version[1]})
 
 	return &Junos{
-		Session:        session,
+		Session:        s,
 		Hostname:       hostname,
 		RoutingEngines: 1,
 		Platform:       res,
@@ -676,14 +674,15 @@ func (j *Junos) Lock() error {
 
 // Rescue will create or delete the rescue configuration given "save" or "delete" for the action.
 func (j *Junos) Rescue(action string) error {
-	if action != "save" || action != "delete" {
-		return errors.New("you must specify save or delete for a rescue config action")
-	}
+	var command string
 
-	command := fmt.Sprintf(rpcRescueSave)
-
-	if action == "delete" {
+	switch action {
+	case "save":
+		command = fmt.Sprintf(rpcRescueSave)
+	case "delete":
 		command = fmt.Sprintf(rpcRescueDelete)
+	default:
+		return errors.New("you must specify save or delete for a rescue config action")
 	}
 
 	reply, err := j.Session.Exec(netconf.RawMethod(command))
