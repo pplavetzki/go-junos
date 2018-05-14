@@ -107,6 +107,15 @@ type RoutingEngine struct {
 	Version string
 }
 
+// DeviceFacts contains the data from doing a get-system-information rpc call
+type DeviceFacts struct {
+	HardwareModel string `xml:"hardware-model"`
+	OSName        string `xml:"os-name"`
+	OSVersion     string `xml:"os-version"`
+	SerialNumber  string `xml:"serial-number"`
+	HostName      string `xml:"host-name"`
+}
+
 type commandXML struct {
 	Config string `xml:",innerxml"`
 }
@@ -167,27 +176,27 @@ type versionPackageInfo struct {
 // genSSHClientConfig is a wrapper function based around the auth method defined
 // (user/password or private key) which returns the SSH client configuration used to
 // connect.
-func genSSHClientConfig(auth *AuthMethod) *ssh.ClientConfig {
+func genSSHClientConfig(auth *AuthMethod) (*ssh.ClientConfig, error) {
 	var config *ssh.ClientConfig
 
 	if len(auth.Credentials) > 0 {
 		config = netconf.SSHConfigPassword(auth.Credentials[0], auth.Credentials[1])
 
-		return config
+		return config, nil
 	}
 
 	if len(auth.PrivateKey) > 0 {
 		config, err := netconf.SSHConfigPubKeyFile(auth.Username, auth.PrivateKey, auth.Passphrase)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("Failed to discover ssh credentials: %s", err)
 		}
 
 		config.HostKeyCallback = ssh.InsecureIgnoreHostKey()
 
-		return config
+		return config, nil
 	}
 
-	return config
+	return config, nil
 }
 
 // NewSession establishes a new connection to a Junos device that we will use
@@ -199,11 +208,14 @@ func genSSHClientConfig(auth *AuthMethod) *ssh.ClientConfig {
 // Please view the package documentation for AuthMethod on how to use these methods.
 func NewSession(host string, auth *AuthMethod) (*Junos, error) {
 	rex := regexp.MustCompile(`^.*\[(.*)\]`)
-	clientConfig := genSSHClientConfig(auth)
+	clientConfig, err := genSSHClientConfig(auth)
+	if err != nil {
+		return nil, err
+	}
 
 	s, err := netconf.DialSSH(host, clientConfig)
 	if err != nil {
-		panic(fmt.Errorf("error connecting to %s - %s", host, err))
+		return nil, fmt.Errorf("error connecting to %s - %s", host, err)
 	}
 
 	reply, err := s.Exec(netconf.RawMethod(rpcVersion))
@@ -338,19 +350,31 @@ func (j *Junos) CommitHistory() (*CommitHistory, error) {
 }
 
 // GetFacts returns device information
-func (j *Junos) GetFacts() error {
+func (j *Junos) GetFacts() (*DeviceFacts, error) {
+	var deviceFacts DeviceFacts
 	reply, err := j.Session.Exec(netconf.RawMethod(rpcSystemInformation))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if reply.Errors != nil {
 		for _, m := range reply.Errors {
-			return errors.New(m.Message)
+			return nil, errors.New(m.Message)
 		}
 	}
 
-	return nil
+	if reply.Data == "" {
+		return nil, errors.New("could not load commit history")
+	}
+
+	formatted := strings.Replace(reply.Data, "\n", "", -1)
+	err = xml.Unmarshal([]byte(formatted), &deviceFacts)
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &deviceFacts, nil
 }
 
 // Commit commits the configuration.
