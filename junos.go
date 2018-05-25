@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -31,6 +32,7 @@ var (
 	rpcConfigFileSet       = "<load-configuration action=\"set\" format=\"text\"><configuration-set>%s</configuration-set></load-configuration>"
 	rpcConfigFileText      = "<load-configuration format=\"text\"><configuration-text>%s</configuration-text></load-configuration>"
 	rpcConfigFileXML       = "<load-configuration format=\"xml\"><configuration>%s</configuration></load-configuration>"
+	rpcSetHostname         = "<load-configuration format=\"xml\"><configuration><system><host-name>%s</host-name></system></configuration></load-configuration>"
 	rpcConfigURLSet        = "<load-configuration action=\"set\" format=\"text\" url=\"%s\"/>"
 	rpcConfigURLText       = "<load-configuration format=\"text\" url=\"%s\"/>"
 	rpcConfigURLXML        = "<load-configuration format=\"xml\" url=\"%s\"/>"
@@ -284,6 +286,16 @@ func (j *Junos) Close() {
 	j.Session.Transport.Close()
 }
 
+// SetHostname wrapper to call rpc method setting the hostname
+func (j *Junos) SetHostname(hostname string) error {
+	command := fmt.Sprintf(rpcSetHostname, hostname)
+	err := j.RawRPC(command, true)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // Command executes any operational mode command, such as "show" or "request." If you wish to return the results
 // of the command, specify the format, which must be "text" or "xml" as the second parameter (optional).
 func (j *Junos) Command(cmd string, format ...string) (string, error) {
@@ -394,10 +406,10 @@ func (j *Junos) Commit() error {
 	formatted := strings.Replace(reply.Data, "\n", "", -1)
 	err = xml.Unmarshal([]byte(formatted), &errs)
 	if err != nil {
-		return err
+		log.Println(err)
 	}
 
-	if errs.Errors != nil {
+	if &errs != nil && errs.Errors != nil {
 		for _, m := range errs.Errors {
 			return errors.New(strings.Trim(m.Message, "[\r\n]"))
 		}
@@ -603,6 +615,29 @@ func (j *Junos) GetConfig(format string, section ...string) (string, error) {
 	return reply.Data, nil
 }
 
+// RawRPC calls a raw rpc method given the rpcMethod optionally with commit
+func (j *Junos) RawRPC(rpcMethod string, commit bool) error {
+	reply, err := j.Session.Exec(netconf.RawMethod(rpcMethod))
+	if err != nil {
+		return err
+	}
+
+	if commit {
+		err = j.Commit()
+		if err != nil {
+			return err
+		}
+	}
+
+	if reply.Errors != nil {
+		for _, m := range reply.Errors {
+			return errors.New(m.Message)
+		}
+	}
+
+	return nil
+}
+
 // Config loads a given configuration file from your local machine,
 // a remote (FTP or HTTP server) location, or via configuration statements
 // from variables (type string or []string) within your script. Format must be
@@ -672,25 +707,7 @@ func (j *Junos) Config(path interface{}, format string, commit bool) error {
 		}
 	}
 
-	reply, err := j.Session.Exec(netconf.RawMethod(command))
-	if err != nil {
-		return err
-	}
-
-	if commit {
-		err = j.Commit()
-		if err != nil {
-			return err
-		}
-	}
-
-	if reply.Errors != nil {
-		for _, m := range reply.Errors {
-			return errors.New(m.Message)
-		}
-	}
-
-	return nil
+	return j.RawRPC(command, commit)
 }
 
 // Lock locks the candidate configuration.
