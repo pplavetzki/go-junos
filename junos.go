@@ -403,6 +403,7 @@ func (j *Junos) Commit() error {
 		}
 	}
 
+	// Changed this because the data returned was always <ok>
 	formatted := strings.Replace(reply.Data, "\n", "", -1)
 	err = xml.Unmarshal([]byte(formatted), &errs)
 	if err != nil {
